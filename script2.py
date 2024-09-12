@@ -2,6 +2,7 @@ import os
 import random
 import time
 import threading
+import math
 import numpy as np
 import wave
 import sounddevice as sd
@@ -9,9 +10,13 @@ import asyncio
 import RPi.GPIO as GPIO
 from openai import OpenAI
 from dotenv import load_dotenv
+import board
+import adafruit_ws2801
 
-
+# Load environment variables from a .env file
 load_dotenv()
+
+# Initialize OpenAI client
 client = OpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
 
 class AudioManager:
@@ -30,7 +35,6 @@ class AudioManager:
         print("Audio input and output devices are available.")
 
     def play_random_audio(self, file_pattern):
-      """Run through all options of in, mid, out individually when needed (no magic numbers, allows for adding more files if needed and add impossible or error audio"""
         files = [f for f in os.listdir('lines') if f.startswith(file_pattern)]
         if files:
             selected_file = random.choice(files)
@@ -39,7 +43,6 @@ class AudioManager:
             os.system(f"aplay {audio_path}")
 
     def record_audio(self, duration, filename):
-      """Post-check for audio devices"""
         print(f"Recording audio for {duration} seconds...")
         recording = sd.rec(int(duration * self.fs), samplerate=self.fs, channels=self.channels, dtype='int16')
         sd.wait()
@@ -53,7 +56,6 @@ class AudioManager:
         print(f"Audio recording saved to {filename}")
 
 class MotorController:
-  """Make sure the step count is the right one with the NEMA17. Check driver too. Also, add the proper positioning map."""
     def __init__(self, pul_pin=14, dir_pin=15, step_count=200):
         self.pul_pin = pul_pin
         self.dir_pin = dir_pin
@@ -79,11 +81,75 @@ class MotorController:
 
         GPIO.cleanup()
 
+class WeightSensor:
+    def __init__(self, data_pin, clock_pin, threshold=50):
+        self.data_pin = data_pin
+        self.clock_pin = clock_pin
+        self.threshold = threshold
+        self.previous_weight = 0
+
+    def setup_sensor(self):
+        # Setup GPIO pins for weight sensor
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(self.data_pin, GPIO.IN)
+        GPIO.setup(self.clock_pin, GPIO.OUT)
+
+    def read_weight(self):
+        # Implement reading from the weight sensor (this depends on your sensor)
+        # Placeholder value:
+        weight = random.randint(0, 1000)
+        return weight
+
+    def detect_significant_change(self):
+        self.setup_sensor()
+        while True:
+            current_weight = self.read_weight()
+            if abs(current_weight - self.previous_weight) > self.threshold:
+                print("Significant weight change detected.")
+                return True
+            self.previous_weight = current_weight
+            time.sleep(0.1)
+
+class LEDController:
+    def __init__(self, num_leds, data_pin, clock_pin):
+        self.num_leds = num_leds
+        self.pixels = adafruit_ws2801.WS2801(board.SCK, board.MOSI, num_leds, brightness=1.0, auto_write=False)
+
+    def set_color(self, color):
+        for i in range(self.num_leds):
+            self.pixels[i] = color
+        self.pixels.show()
+
+    def ease_in(self, target_color, steps=50, duration=1.0):
+        """
+        Gradually changes the LED color to the target color with an ease-in effect.
+        :param target_color: Tuple of (R, G, B) values for the target color.
+        :param steps: Number of steps in the transition.
+        :param duration: Total duration of the ease-in effect in seconds.
+        """
+        start_color = (0, 0, 0)  # Starting with LEDs off
+        for step in range(steps + 1):
+            factor = math.pow(step / steps, 2)  # Quadratic ease-in
+            intermediate_color = tuple(
+                int(start_color[i] + factor * (target_color[i] - start_color[i]))
+                for i in range(3)
+            )
+            self.set_color(intermediate_color)
+            time.sleep(duration / steps)
+
+    def light_up(self, color):
+        self.ease_in(color)
+
+    def change_color_step(self, color):
+        self.ease_in(color)
+        time.sleep(0.5)
+
 class BartenderBot:
-  """Managing """
-    def __init__(self):
+    def __init__(self, num_leds, led_data_pin, led_clock_pin, weight_data_pin, weight_clock_pin):
         self.audio_manager = AudioManager()
         self.motor_controller = MotorController()
+        self.led_controller = LEDController(num_leds, led_data_pin, led_clock_pin)
+        self.weight_sensor = WeightSensor(weight_data_pin, weight_clock_pin)
 
     async def transcribe_with_whisper(self, audio_file):
         print("Transcribing audio with Whisper...")
@@ -126,6 +192,13 @@ class BartenderBot:
     async def process_order(self):
         self.audio_manager.check_audio_devices()
 
+        # Wait until significant weight change is detected
+        print("Waiting for glass to be placed...")
+        self.weight_sensor.detect_significant_change()
+
+        # Light up LEDs when glass is detected
+        self.led_controller.light_up((0, 255, 0))  # Green color for detection
+
         # Play an initial audio file
         self.audio_manager.play_random_audio('in')
 
@@ -147,6 +220,9 @@ class BartenderBot:
             print("Final result:")
             print(result)
 
+            # Change LED color for processing
+            self.led_controller.change_color_step((255, 255, 0))  # Yellow for processing
+
             # Rotate motor after processing
             self.motor_controller.rotate_motor()
 
@@ -156,10 +232,13 @@ class BartenderBot:
         # Play a final audio file
         self.audio_manager.play_random_audio('out')
 
+        # Change LED color to indicate completion
+        self.led_controller.change_color_step((0, 0, 255))  # Blue for completion
+
         print("Process complete.")
 
 async def main():
-    bot = BartenderBot()
+    bot = BartenderBot(num_leds=30, led_data_pin=18, led_clock_pin=23, weight_data_pin=5, weight_clock_pin=6)
     await bot.process_order()
 
 # Run the main function
