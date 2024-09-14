@@ -120,6 +120,12 @@ class LEDController:
             self.pixels[i] = color
         self.pixels.show()
 
+    def oscillate(self, color1):
+        self.set_color(color1)
+        time.sleep(0.5)
+        self.set_color((0, 0, 0))
+        time.sleep(0.5)
+
     def ease_in(self, target_color, steps=50, duration=1.0):
         """
         Gradually changes the LED color to the target color with an ease-in effect.
@@ -139,6 +145,9 @@ class LEDController:
 
     def light_up(self, color):
         self.ease_in(color)
+
+    def light_down(self):
+        self.ease_in((0, 0, 0))
 
     def change_color_step(self, color):
         self.ease_in(color)
@@ -197,7 +206,7 @@ class BartenderBot:
         self.weight_sensor.detect_significant_change()
 
         # Light up LEDs when glass is detected
-        self.led_controller.light_up((0, 255, 0))  # Green color for detection
+        self.led_controller.light_up((100, 100, 120))  # Green color for detection
 
         # Play an initial audio file
         self.audio_manager.play_random_audio('in')
@@ -207,35 +216,46 @@ class BartenderBot:
         # Record audio for 5 seconds
         self.audio_manager.record_audio(5, output_file)
 
-        # Start the mid-processing audio in a separate thread
-        mid_audio_thread = threading.Thread(target=self.audio_manager.play_random_audio, args=('mid',))
-        mid_audio_thread.start()
-
         # Transcribe the audio using Whisper
         transcription = await self.transcribe_with_whisper(output_file)
 
         if transcription:
+            # Start the mid-processing audio in a separate thread
             # Check if the transcription is a valid cocktail request
             result = await self.check_cocktail_request(transcription)
             print("Final result:")
             print(result)
 
-            # Change LED color for processing
-            self.led_controller.change_color_step((255, 255, 0))  # Yellow for processing
+            if "error" in result:
+                print("Error: Invalid request.")
+                self.led_controller.change_color_step((160, 70, 70))
+                return
+            elif "impossible" in result:
+                print("Error: Cocktail request is impossible.")
+                self.led_controller.change_color_step((160, 70, 70))
+                return
+            else:
+                print("Processing cocktail request...")
+                mid_audio_thread = threading.Thread(target=self.audio_manager.play_random_audio, args=('mid',))
+                mid_audio_thread.start()
+                self.led_controller.oscillate((100, 100, 0))
+                self.led_controller.oscillate((100, 100, 0))  # Yellow for processing
+                self.motor_controller.rotate_motor()
+                # Ensure the mid-audio thread has finished
+                mid_audio_thread.join()
+                # Change LED color to indicate completion
+                self.led_controller.change_color_step((70, 160, 70))  # Blue for completion
+                # Play a final audio file
+                self.audio_manager.play_random_audio('out')
 
-            # Rotate motor after processing
-            self.motor_controller.rotate_motor()
-
-        # Ensure the mid-audio thread has finished
-        mid_audio_thread.join()
-
-        # Play a final audio file
-        self.audio_manager.play_random_audio('out')
-
-        # Change LED color to indicate completion
-        self.led_controller.change_color_step((0, 0, 255))  # Blue for completion
+        else:
+            print("Error: No transcription received.")
+            self.led_controller.change_color_step((160, 70, 70))
 
         print("Process complete.")
+        time.sleep(2)
+        self.led_controller.light_down()
+
 
 async def main():
     bot = BartenderBot(num_leds=30, led_data_pin=18, led_clock_pin=23, weight_data_pin=5, weight_clock_pin=6)
