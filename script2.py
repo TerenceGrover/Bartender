@@ -11,7 +11,7 @@ import RPi.GPIO as GPIO
 from openai import OpenAI
 from dotenv import load_dotenv
 import board
-import adafruit_ws2801
+import neopixel
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -110,15 +110,16 @@ class WeightSensor:
             self.previous_weight = current_weight
             time.sleep(0.1)
 
-class LEDController:
-    def __init__(self, num_leds, data_pin, clock_pin):
+class LEDHandler:
+    def __init__(self, num_leds, data_pins):
         self.num_leds = num_leds
-        self.pixels = adafruit_ws2801.WS2801(board.SCK, board.MOSI, num_leds, brightness=1.0, auto_write=False)
+        self.pixels = [neopixel.NeoPixel(pin, num_leds, brightness=1.0, auto_write=False) for pin in data_pins]
 
     def set_color(self, color):
-        for i in range(self.num_leds):
-            self.pixels[i] = color
-        self.pixels.show()
+        for strip in self.pixels:
+            for i in range(self.num_leds):
+                strip[i] = color
+            strip.show()
 
     def oscillate(self, color1):
         self.set_color(color1)
@@ -127,15 +128,9 @@ class LEDController:
         time.sleep(0.5)
 
     def ease_in(self, target_color, steps=50, duration=1.0):
-        """
-        Gradually changes the LED color to the target color with an ease-in effect.
-        :param target_color: Tuple of (R, G, B) values for the target color.
-        :param steps: Number of steps in the transition.
-        :param duration: Total duration of the ease-in effect in seconds.
-        """
-        start_color = (0, 0, 0)  # Starting with LEDs off
+        start_color = (0, 0, 0)
         for step in range(steps + 1):
-            factor = math.pow(step / steps, 2)  # Quadratic ease-in
+            factor = math.pow(step / steps, 2)
             intermediate_color = tuple(
                 int(start_color[i] + factor * (target_color[i] - start_color[i]))
                 for i in range(3)
@@ -154,10 +149,10 @@ class LEDController:
         time.sleep(0.5)
 
 class BartenderBot:
-    def __init__(self, num_leds, led_data_pin, led_clock_pin, weight_data_pin, weight_clock_pin):
+    def __init__(self, num_leds, led_data_pins, weight_data_pin, weight_clock_pin):
         self.audio_manager = AudioManager()
         self.motor_controller = MotorController()
-        self.led_controller = LEDController(num_leds, led_data_pin, led_clock_pin)
+        self.led_controller = LEDHandler(num_leds, led_data_pins)
         self.weight_sensor = WeightSensor(weight_data_pin, weight_clock_pin)
 
     async def transcribe_with_whisper(self, audio_file):
@@ -258,7 +253,7 @@ class BartenderBot:
 
 
 async def main():
-    bot = BartenderBot(num_leds=30, led_data_pin=18, led_clock_pin=23, weight_data_pin=5, weight_clock_pin=6)
+    bot = BartenderBot(num_leds=20, led_data_pins=[board.D5, board.D6, board.D13], weight_data_pin=5, weight_clock_pin=6)
     await bot.process_order()
 
 # Run the main function
