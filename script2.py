@@ -10,8 +10,7 @@ import asyncio
 import RPi.GPIO as GPIO
 from openai import OpenAI
 from dotenv import load_dotenv
-import board
-import neopixel
+from rpi_ws281x import PixelStrip, Color
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -67,7 +66,7 @@ class MotorController:
         GPIO.setup(self.pul_pin, GPIO.OUT)
         GPIO.setup(self.dir_pin, GPIO.OUT)
 
-    def rotate_motor(self, degrees=180):
+    def rotate_motor(self, degrees=40):
         self.setup_gpio()
         steps = int(self.step_count * degrees / 360)
         print(f"Rotating motor {degrees} degrees...")
@@ -89,51 +88,77 @@ class WeightSensor:
         self.previous_weight = 0
 
     def setup_sensor(self):
-        # Setup GPIO pins for weight sensor
         GPIO.setmode(GPIO.BCM)
         GPIO.setup(self.data_pin, GPIO.IN)
         GPIO.setup(self.clock_pin, GPIO.OUT)
 
     def read_weight(self):
-        # Implement reading from the weight sensor (this depends on your sensor)
-        # Placeholder value:
+        weight = 100
+        # GPIO.output(self.clock_pin, GPIO.HIGH)
+        # GPIO.output(self.clock_pin, GPIO.LOW)
+        # for _ in range(24):
+        #     GPIO.output(self.clock_pin, GPIO.HIGH)
+        #     weight = (weight << 1) | GPIO.input(self.data_pin)
+        #     GPIO.output(self.clock_pin, GPIO.LOW)
+        
+        # # The HX711 has a 24-bit two's complement output.
+        # # If the 24th bit (sign bit) is set, the weight value is negative.
+        # if weight & 0x800000:  # If the 24th bit is set
+        #     weight -= 0x1000000  # Apply two's complement to get the correct value
+        
+        # GPIO.output(self.clock_pin, GPIO.HIGH)
+        # GPIO.output(self.clock_pin, GPIO.LOW)
+
+        # placeholder for testing random
         weight = random.randint(0, 1000)
+        
+        print(f"Raw weight: {weight}")
         return weight
 
     def detect_significant_change(self):
         self.setup_sensor()
+        self.previous_weight = self.read_weight()
         while True:
             current_weight = self.read_weight()
             if abs(current_weight - self.previous_weight) > self.threshold:
                 print("Significant weight change detected.")
                 return True
             self.previous_weight = current_weight
-            time.sleep(0.1)
+            time.sleep(0.5)
 
 class LEDHandler:
-    def __init__(self, num_leds, data_pins):
-        self.num_leds = num_leds
-        self.pixels = [neopixel.NeoPixel(pin, num_leds, brightness=1.0, auto_write=False) for pin in data_pins]
+    def __init__(self, num_leds, led_pin, led_freq_hz=800000, led_dma=5, led_brightness=55, led_channel=1):
+        self.strip = PixelStrip(num_leds, led_pin, led_freq_hz, led_dma, False, led_brightness, led_channel)
+        self.strip.begin()
 
     def set_color(self, color):
-        for strip in self.pixels:
-            for i in range(self.num_leds):
-                strip[i] = color
-            strip.show()
+        for i in range(self.strip.numPixels()):
+            self.strip.setPixelColor(i, color)
+        self.strip.show()
 
     def oscillate(self, color1):
         self.set_color(color1)
         time.sleep(0.5)
-        self.set_color((0, 0, 0))
+        self.set_color(Color(0, 0, 0))
         time.sleep(0.5)
 
     def ease_in(self, target_color, steps=50, duration=1.0):
-        start_color = (0, 0, 0)
+        start_color = Color(0, 0, 0)
+
+        start_r = (start_color >> 16) & 0xFF
+        start_g = (start_color >> 8) & 0xFF
+        start_b = start_color & 0xFF
+
+        target_r = (target_color >> 16) & 0xFF
+        target_g = (target_color >> 8) & 0xFF
+        target_b = target_color & 0xFF
+
         for step in range(steps + 1):
             factor = math.pow(step / steps, 2)
-            intermediate_color = tuple(
-                int(start_color[i] + factor * (target_color[i] - start_color[i]))
-                for i in range(3)
+            intermediate_color = Color(
+                int(start_r + factor * (target_r - start_r)),
+                int(start_g + factor * (target_g - start_g)),
+                int(start_b + factor * (target_b - start_b))
             )
             self.set_color(intermediate_color)
             time.sleep(duration / steps)
@@ -142,17 +167,17 @@ class LEDHandler:
         self.ease_in(color)
 
     def light_down(self):
-        self.ease_in((0, 0, 0))
+        self.ease_in(Color(0, 0, 0))
 
     def change_color_step(self, color):
         self.ease_in(color)
         time.sleep(0.5)
 
 class BartenderBot:
-    def __init__(self, num_leds, led_data_pins, weight_data_pin, weight_clock_pin):
+    def __init__(self, num_leds, led_pin, weight_data_pin, weight_clock_pin):
         self.audio_manager = AudioManager()
         self.motor_controller = MotorController()
-        self.led_controller = LEDHandler(num_leds, led_data_pins)
+        self.led_controller = LEDHandler(num_leds, led_pin)
         self.weight_sensor = WeightSensor(weight_data_pin, weight_clock_pin)
 
     async def transcribe_with_whisper(self, audio_file):
@@ -201,7 +226,7 @@ class BartenderBot:
         self.weight_sensor.detect_significant_change()
 
         # Light up LEDs when glass is detected
-        self.led_controller.light_up((100, 100, 120))  # Green color for detection
+        self.led_controller.light_up(Color(200, 100, 120))  # Green color for detection
 
         # Play an initial audio file
         self.audio_manager.play_random_audio('in')
@@ -223,29 +248,29 @@ class BartenderBot:
 
             if "error" in result:
                 print("Error: Invalid request.")
-                self.led_controller.change_color_step((160, 70, 70))
+                self.led_controller.change_color_step(Color(160, 70, 70))
                 return
             elif "impossible" in result:
                 print("Error: Cocktail request is impossible.")
-                self.led_controller.change_color_step((160, 70, 70))
+                self.led_controller.change_color_step(Color(160, 70, 70))
                 return
             else:
                 print("Processing cocktail request...")
                 mid_audio_thread = threading.Thread(target=self.audio_manager.play_random_audio, args=('mid',))
                 mid_audio_thread.start()
-                self.led_controller.oscillate((100, 100, 0))
-                self.led_controller.oscillate((100, 100, 0))  # Yellow for processing
+                self.led_controller.oscillate(Color(100, 100, 0))
+                self.led_controller.oscillate(Color(100, 100, 0))  # Yellow for processing
                 self.motor_controller.rotate_motor()
                 # Ensure the mid-audio thread has finished
                 mid_audio_thread.join()
                 # Change LED color to indicate completion
-                self.led_controller.change_color_step((70, 160, 70))  # Blue for completion
+                self.led_controller.change_color_step(Color(70, 160, 70))  # Blue for completion
                 # Play a final audio file
                 self.audio_manager.play_random_audio('out')
 
         else:
             print("Error: No transcription received.")
-            self.led_controller.change_color_step((160, 70, 70))
+            self.led_controller.change_color_step(Color(160, 70, 70))
 
         print("Process complete.")
         time.sleep(2)
@@ -253,7 +278,7 @@ class BartenderBot:
 
 
 async def main():
-    bot = BartenderBot(num_leds=20, led_data_pins=[board.D5, board.D6, board.D13], weight_data_pin=5, weight_clock_pin=6)
+    bot = BartenderBot(num_leds=20, led_pin=13, weight_data_pin=6, weight_clock_pin=5)
     await bot.process_order()
 
 # Run the main function
