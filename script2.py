@@ -11,6 +11,7 @@ import RPi.GPIO as GPIO
 from openai import OpenAI
 from dotenv import load_dotenv
 from rpi_ws281x import PixelStrip, Color
+import requests
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -59,6 +60,7 @@ class MotorController:
         self.pul_pin = pul_pin
         self.dir_pin = dir_pin
         self.step_count = step_count
+        self.esp32_ip = '192.168.1.10'  # Replace with your ESP32's IP address
 
     def setup_gpio(self):
         GPIO.setmode(GPIO.BCM)
@@ -66,7 +68,7 @@ class MotorController:
         GPIO.setup(self.pul_pin, GPIO.OUT)
         GPIO.setup(self.dir_pin, GPIO.OUT)
 
-    def rotate_motor(self, degrees=40):
+    def rotate_motor(self, degrees=180, relay_number=0):
         self.setup_gpio()
         steps = int(self.step_count * degrees / 360)
         print(f"Rotating motor {degrees} degrees...")
@@ -80,8 +82,25 @@ class MotorController:
 
         GPIO.cleanup()
 
+        # After rotation, trigger the relay via HTTP request to the ESP32
+        self.trigger_relay(relay_number, state="on")
+        time.sleep(3)  # Simulate valve open for 3 seconds
+        self.trigger_relay(relay_number, state="off")
+
+    def trigger_relay(self, relay_number, state):
+        # Create the URL to trigger the relay
+        url = f"http://{self.esp32_ip}/relay?number={relay_number}&state={state}"
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                print(f"Relay {relay_number} turned {state}")
+            else:
+                print(f"Failed to control relay {relay_number}: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            print(f"Error controlling relay {relay_number}: {e}")
+
 class WeightSensor:
-    def __init__(self, data_pin, clock_pin, threshold=50):
+    def __init__(self, data_pin, clock_pin, threshold=5000):
         self.data_pin = data_pin
         self.clock_pin = clock_pin
         self.threshold = threshold
@@ -93,27 +112,47 @@ class WeightSensor:
         GPIO.setup(self.clock_pin, GPIO.OUT)
 
     def read_weight(self):
-        weight = 100
-        # GPIO.output(self.clock_pin, GPIO.HIGH)
-        # GPIO.output(self.clock_pin, GPIO.LOW)
-        # for _ in range(24):
-        #     GPIO.output(self.clock_pin, GPIO.HIGH)
-        #     weight = (weight << 1) | GPIO.input(self.data_pin)
-        #     GPIO.output(self.clock_pin, GPIO.LOW)
-        
-        # # The HX711 has a 24-bit two's complement output.
-        # # If the 24th bit (sign bit) is set, the weight value is negative.
-        # if weight & 0x800000:  # If the 24th bit is set
-        #     weight -= 0x1000000  # Apply two's complement to get the correct value
-        
-        # GPIO.output(self.clock_pin, GPIO.HIGH)
-        # GPIO.output(self.clock_pin, GPIO.LOW)
+        # Simulating actual reading logic with a placeholder for HX711 sensor data.
+        count = 0
 
-        # placeholder for testing random
-        weight = random.randint(0, 1000)
-        
-        print(f"Raw weight: {weight}")
-        return weight
+        # Wait for data ready (data pin goes low)
+        while GPIO.input(self.data_pin):
+            pass
+
+        # Read 24-bit data from the HX711
+        for _ in range(24):
+            GPIO.output(self.clock_pin, GPIO.HIGH)
+            count = count << 1
+            GPIO.output(self.clock_pin, GPIO.LOW)
+            if GPIO.input(self.data_pin):
+                count += 1
+
+        # Set the gain to 128 and pulse once more to complete the reading
+        GPIO.output(self.clock_pin, GPIO.HIGH)
+        GPIO.output(self.clock_pin, GPIO.LOW)
+
+        # Convert the two's complement 24-bit result to a signed integer
+        if count & 0x800000:
+            count -= 0x1000000
+
+        return count
+
+    def detect_significant_change(self):
+        self.setup_sensor()
+        self.previous_weight = self.read_weight()
+        while True:
+            current_weight = self.read_weight()
+            weight_difference = abs(current_weight - self.previous_weight)
+
+            # Detect if the change exceeds the threshold
+            if weight_difference > self.threshold:
+                print(f"Significant weight change detected! Difference: {weight_difference}")
+                return True
+            else:
+                print(f"No significant change. Current weight: {current_weight} (Difference: {weight_difference})")
+
+            self.previous_weight = current_weight
+            time.sleep(0.5)
 
     def detect_significant_change(self):
         self.setup_sensor()
@@ -222,8 +261,9 @@ class BartenderBot:
         self.audio_manager.check_audio_devices()
 
         # Wait until significant weight change is detected
-        print("Waiting for glass to be placed...")
+        print("Waiting for significant weight change...")
         self.weight_sensor.detect_significant_change()
+        print("Significant change detected, proceeding...")
 
         # Light up LEDs when glass is detected
         self.led_controller.light_up(Color(200, 100, 120))  # Green color for detection
@@ -260,7 +300,7 @@ class BartenderBot:
                 mid_audio_thread.start()
                 self.led_controller.oscillate(Color(100, 100, 0))
                 self.led_controller.oscillate(Color(100, 100, 0))  # Yellow for processing
-                self.motor_controller.rotate_motor()
+                self.motor_controller.rotate_motor(degrees=180, relay_number=1)
                 # Ensure the mid-audio thread has finished
                 mid_audio_thread.join()
                 # Change LED color to indicate completion
