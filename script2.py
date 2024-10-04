@@ -12,6 +12,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from rpi_ws281x import PixelStrip, Color
 import requests
+import json
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -56,39 +57,82 @@ class AudioManager:
         print(f"Audio recording saved to {filename}")
 
 class MotorController:
-    def __init__(self, pul_pin=14, dir_pin=15, step_count=200):
+    def __init__(self, pul_pin=14, dir_pin=15, step_count=800, limit_switch_pin=17):
         self.pul_pin = pul_pin
         self.dir_pin = dir_pin
         self.step_count = step_count
         self.esp32_ip = '192.168.1.10'  # Replace with your ESP32's IP address
+        self.limit_switch_pin = limit_switch_pin
+        self.positions = {}  # To store alcohol, angle, and relay assignments
+        self.current_position = 0  # Track current position in degrees
+
+        self.setup_gpio()
+        self.home_motor()  # Perform homing sequence on boot
 
     def setup_gpio(self):
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
         GPIO.setup(self.pul_pin, GPIO.OUT)
         GPIO.setup(self.dir_pin, GPIO.OUT)
+        GPIO.setup(self.limit_switch_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # Limit switch input with pull-up resistor
 
-    def rotate_motor(self, degrees=180, relay_number=0):
-        self.setup_gpio()
-        steps = int(self.step_count * degrees / 360)
-        print(f"Rotating motor {degrees} degrees...")
+    def add_position(self, alcohol, angle, relay_number):
+        """Add a new position for an alcohol, associated with an angle and relay number."""
+        self.positions[alcohol] = {'angle': angle, 'relay': relay_number}
 
+    def home_motor(self):
+        """Homing sequence to find the limit switch and set the current position to 0."""
+        print("Starting homing sequence...")
+        GPIO.output(self.dir_pin, GPIO.HIGH)  # Set motor direction to home
+        while GPIO.input(self.limit_switch_pin) == GPIO.HIGH:  # Wait until limit switch is pressed
+            GPIO.output(self.pul_pin, GPIO.HIGH)
+            time.sleep(0.003)
+            GPIO.output(self.pul_pin, GPIO.LOW)
+            time.sleep(0.003)
+        print("Home position found.")
+        self.current_position = 0  # Reset current position to 0
+
+    def rotate_motor(self, alcohol):
+        """Rotate the motor to the position associated with the specified alcohol."""
+        if alcohol not in self.positions:
+            print(f"Alcohol '{alcohol}' not found in positions.")
+            return
+
+        target_angle = self.positions[alcohol]['angle']
+        relay_number = self.positions[alcohol]['relay']
+        steps = self.calculate_steps_to_target(target_angle)
+        
         GPIO.output(self.dir_pin, GPIO.HIGH)
+
+        # Rotate motor to target position
         for _ in range(steps):
             GPIO.output(self.pul_pin, GPIO.HIGH)
-            time.sleep(0.01)
+            time.sleep(0.003)
             GPIO.output(self.pul_pin, GPIO.LOW)
-            time.sleep(0.01)
+            time.sleep(0.003)
 
-        GPIO.cleanup()
+        # Update current position
+        self.current_position = target_angle
 
-        # After rotation, trigger the relay via HTTP request to the ESP32
-        self.trigger_relay(relay_number, state="on")
-        time.sleep(3)  # Simulate valve open for 3 seconds
-        self.trigger_relay(relay_number, state="off")
+        # Trigger the relay for this alcohol
+        self.trigger_relay(relay_number, "on")
+        time.sleep(5)  # Simulate valve open for 3 seconds (adjust for actual pour time)
+        self.trigger_relay(relay_number, "off")
+
+        time.sleep(1)
+
+        # After pouring, return to home position
+        self.home_motor()
+
+    def calculate_steps_to_target(self, target_angle):
+        """Calculate the number of steps needed to reach the target angle."""
+        angle_difference = abs(target_angle - self.current_position)
+        steps = int(self.step_count * angle_difference / 360)
+        return steps
 
     def trigger_relay(self, relay_number, state):
-        # Create the URL to trigger the relay
+        """Send an HTTP request to the ESP32 to control the relay."""
+
         url = f"http://{self.esp32_ip}/relay?number={relay_number}&state={state}"
         try:
             response = requests.get(url)
@@ -99,12 +143,14 @@ class MotorController:
         except requests.exceptions.RequestException as e:
             print(f"Error controlling relay {relay_number}: {e}")
 
+
 class WeightSensor:
-    def __init__(self, data_pin, clock_pin, threshold=5000):
+    def __init__(self, data_pin, clock_pin, threshold=10000, stability_checks=1):
         self.data_pin = data_pin
         self.clock_pin = clock_pin
         self.threshold = threshold
         self.previous_weight = 0
+        self.stability_checks = stability_checks
 
     def setup_sensor(self):
         GPIO.setmode(GPIO.BCM)
@@ -137,19 +183,28 @@ class WeightSensor:
 
         return count
 
-    def detect_significant_change(self):
+
+    def detect_stability(self):
         self.setup_sensor()
         self.previous_weight = self.read_weight()
+        stable_readings = 0
+
         while True:
             current_weight = self.read_weight()
             weight_difference = abs(current_weight - self.previous_weight)
 
             # Detect if the change exceeds the threshold
-            if weight_difference > self.threshold:
-                print(f"Significant weight change detected! Difference: {weight_difference}")
-                return True
+            print(weight_difference)
+            print(self.threshold)
+            if weight_difference <= self.threshold:
+                stable_readings += 1
+                print(stable_readings, 'stable readings')
+                if stable_readings >= self.stability_checks:
+                    print(f"Weight stable for {self.stability_checks} consecutive checks.")
+                    return False  # Weight has stabilized
             else:
-                print(f"No significant change. Current weight: {current_weight} (Difference: {weight_difference})")
+                print(f"Significant weight change detected! Difference: {weight_difference}")
+                stable_readings = 0  # Reset stability counter if a significant change occurs
 
             self.previous_weight = current_weight
             time.sleep(0.5)
@@ -164,6 +219,7 @@ class WeightSensor:
                 return True
             self.previous_weight = current_weight
             time.sleep(0.5)
+        
 
 class LEDHandler:
     def __init__(self, num_leds, led_pin, led_freq_hz=800000, led_dma=5, led_brightness=55, led_channel=1):
@@ -218,6 +274,15 @@ class BartenderBot:
         self.motor_controller = MotorController()
         self.led_controller = LEDHandler(num_leds, led_pin)
         self.weight_sensor = WeightSensor(weight_data_pin, weight_clock_pin)
+        self.setup_positions()  # Configure positions for the alcohols
+
+    def setup_positions(self):
+        """Setup positions for different alcohols, assigning an angle and relay number."""
+        self.motor_controller.add_position('vodka', 30, 1)
+        self.motor_controller.add_position('gin', 180, 0)
+        self.motor_controller.add_position('tonic', 300, 4)
+        self.motor_controller.add_position('juice', 100, 3)
+        # self.motor_controller.add_position('orange juice', 240, 4)
 
     async def transcribe_with_whisper(self, audio_file):
         print("Transcribing audio with Whisper...")
@@ -233,29 +298,33 @@ class BartenderBot:
     async def check_cocktail_request(self, transcription):
         print("Checking if the transcription is a valid cocktail request...")
         prompt = f"""
-        Check if the input includes a cocktail request. If not, return "error". If it is, check if it can be made with the ingredients: vodka, gin, tonic, triple sec, orange juice. If possible, return a JSON with the ingredient percentages. If not, return "impossible".
+        Check if the input includes a cocktail request. If not, return "error". If it is, check if it can be made with the ingredients: vodka, gin, tonic, juice. If possible, return a JSON with the ingredient percentages, you can be lenient on the feasibility and arrange a bit to make it possible. If not, return "impossible".
 
-    Input examples:
-    1. "Can you make a screwdriver?"
-       Output: {{"vodka": "33%", "orange juice": "67%"}}
-    2. "Can you make a margarita?"
-       Output: "impossible"
-    3. "I want a sandwich."
-       Output: "error"
-
-    Transcription: "{transcription}"
+        Transcription: "{transcription}"
         """
-
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}]
         )
-
         response_content = response.choices[0].message.content
-
         print("Cocktail check complete.")
         print(f"GPT-4 Response: {response_content}")
         return response_content
+
+    def process_cocktail(self, recipe):
+        """Process the cocktail recipe by rotating to each ingredient and pouring."""
+        for ingredient, percentage in recipe.items():
+            print(f"Processing {ingredient} ({percentage})")
+
+            # Wait until no more significant weight changes (i.e., weight has stabilized)
+            print("Waiting for weight sensor stability...")
+            while self.weight_sensor.detect_stability():
+                print("Waiting for stability...")
+                time.sleep(0.5)
+
+            # Once stable, rotate to position and pour
+            self.motor_controller.rotate_motor(ingredient)
+            time.sleep(0.5)  # Delay between pours (adjust as needed)
 
     async def process_order(self):
         self.audio_manager.check_audio_devices()
@@ -276,11 +345,17 @@ class BartenderBot:
         # Record audio for 5 seconds
         self.audio_manager.record_audio(5, output_file)
 
+        # Play the mid-processing audio in a separate thread
+        mid_audio_thread = threading.Thread(target=self.audio_manager.play_random_audio, args=('mid',))
+        mid_audio_thread.start()
+
         # Transcribe the audio using Whisper
         transcription = await self.transcribe_with_whisper(output_file)
 
+        # Wait for the mid-audio thread to finish before proceeding
+        mid_audio_thread.join()
+
         if transcription:
-            # Start the mid-processing audio in a separate thread
             # Check if the transcription is a valid cocktail request
             result = await self.check_cocktail_request(transcription)
             print("Final result:")
@@ -295,14 +370,19 @@ class BartenderBot:
                 self.led_controller.change_color_step(Color(160, 70, 70))
                 return
             else:
-                print("Processing cocktail request...")
-                mid_audio_thread = threading.Thread(target=self.audio_manager.play_random_audio, args=('mid',))
-                mid_audio_thread.start()
-                self.led_controller.oscillate(Color(100, 100, 0))
-                self.led_controller.oscillate(Color(100, 100, 0))  # Yellow for processing
-                self.motor_controller.rotate_motor(degrees=180, relay_number=1)
-                # Ensure the mid-audio thread has finished
-                mid_audio_thread.join()
+                # Extract the JSON portion from the GPT-4 response
+                start_index = result.find("{")
+                end_index = result.rfind("}") + 1
+                json_str = result[start_index:end_index]
+
+                try:
+                    recipe = json.loads(json_str)  # Parse the JSON safely
+                    print("Processing cocktail recipe:", recipe)
+                    self.process_cocktail(recipe)
+                except json.JSONDecodeError:
+                    print("Error: Failed to parse JSON.")
+                    return
+
                 # Change LED color to indicate completion
                 self.led_controller.change_color_step(Color(70, 160, 70))  # Blue for completion
                 # Play a final audio file
@@ -313,8 +393,9 @@ class BartenderBot:
             self.led_controller.change_color_step(Color(160, 70, 70))
 
         print("Process complete.")
-        time.sleep(2)
+        time.sleep(1)
         self.led_controller.light_down()
+
 
 
 async def main():
