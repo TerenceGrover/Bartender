@@ -4,4 +4,5 @@ It controls a motor, LED strips, a speaker, a microphone and sensors simultaneou
 For more info please visit those links : 
 
 [Technical Breakdown on Electromaker](https://www.electromaker.io/project/view/the-bartender)
+
 [YouTube Video Build and Test](https://www.youtube.com/watch?v=Akv8ZLIwzus&t=9s)
